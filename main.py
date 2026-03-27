@@ -149,8 +149,8 @@ def get_data_decrypt(
     )
 
     # --- column-level permission processing ---
-    # Only return identifier columns + the requested columns
-    base_columns = [c for c in DATASET.columns if c not in SENSITIVE_COLUMNS]
+    # Only return user_id (merge key) + the requested columns
+    base_columns = ["user_id"]
     processed: list[dict] = []
     for row in records:
         new_row = {col: row[col] for col in base_columns}
