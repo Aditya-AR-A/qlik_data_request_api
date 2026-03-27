@@ -111,6 +111,7 @@ def get_data(
 def get_data_decrypt(
     requester_id: int = Query(..., description="ID of the requesting user"),
     columns: str = Query(..., description="Comma-separated list of columns to decrypt (e.g. 'salary,ssn')"),
+    user_ids: Optional[str] = Query(None, description="Comma-separated list of user_ids to decrypt (e.g. '1,3,7'). If omitted, all accessible rows are returned."),
     limit: Optional[int] = Query(None, ge=1, description="Max records to return"),
     offset: Optional[int] = Query(None, ge=0, description="Number of records to skip"),
 ):
@@ -141,10 +142,23 @@ def get_data_decrypt(
 
     # --- section access (row-level) ---
     records = _apply_section_access(requester_id)
+
+    # --- optional user_id filtering (targeted decryption) ---
+    if user_ids is not None:
+        target_ids = set()
+        for uid in user_ids.split(","):
+            uid = uid.strip()
+            if uid.isdigit():
+                target_ids.add(int(uid))
+        if not target_ids:
+            raise HTTPException(status_code=400, detail="Invalid user_ids parameter. Provide comma-separated integers.")
+        records = [r for r in records if r["user_id"] in target_ids]
+
     logger.info(
-        "GET /data/decrypt | requester_id=%s | columns=%s | rows=%d",
+        "GET /data/decrypt | requester_id=%s | columns=%s | user_ids=%s | rows=%d",
         requester_id,
         requested,
+        user_ids or "all",
         len(records),
     )
 
