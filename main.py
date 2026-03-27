@@ -149,9 +149,11 @@ def get_data_decrypt(
     )
 
     # --- column-level permission processing ---
+    # Only return identifier columns + the requested columns
+    base_columns = [c for c in DATASET.columns if c not in SENSITIVE_COLUMNS]
     processed: list[dict] = []
     for row in records:
-        new_row = dict(row)
+        new_row = {col: row[col] for col in base_columns}
         for col in requested:
             perm = get_column_permission(requester_id, col)
             if perm == "full":
