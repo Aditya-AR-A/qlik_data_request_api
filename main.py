@@ -163,7 +163,7 @@ def decrypt_data(
             logger.warning("decrypt.step=payload_json_invalid")
             raise HTTPException(status_code=400, detail="Invalid payload_json.") from exc
 
-    # Return a schema-friendly sample for connector setup when no body is sent.
+    # Return a schema-friendly sample list for connector setup when no body is sent.
     if payload is None:
         test_id_column = (id_column or "id").strip() or "id"
         test_columns = _parse_columns(columns) if columns else []
@@ -172,19 +172,8 @@ def decrypt_data(
             sample_row[col] = ""
 
         sample_rows = [sample_row] if test_columns else []
-        response_content = {
-            "root": sample_rows,
-            "rows": sample_rows,
-            "meta": {
-                "id_column": test_id_column,
-                "columns": test_columns,
-                "rows": len(sample_rows),
-                "failures": 0,
-                "mode": "connection_test",
-            },
-        }
-        logger.info("decrypt.step=connection_test response=%s", _preview_json(response_content))
-        return JSONResponse(content=response_content)
+        logger.info("decrypt.step=connection_test response=%s", _preview_json(sample_rows))
+        return JSONResponse(content=sample_rows)
 
     if not payload.rows:
         raise HTTPException(status_code=400, detail="rows must contain at least one item.")
@@ -269,23 +258,12 @@ def decrypt_data(
             _preview_json(_preview_row(out_row)),
         )
 
-    response_content = {
-        "root": output_rows,
-        "rows": output_rows,
-        "meta": {
-            "id_column": requested_id_column,
-            "columns": requested_columns,
-            "rows": len(output_rows),
-            "failures": failures,
-        },
-    }
-
     logger.info(
         "decrypt.step=complete rows=%d columns=%s failures=%d final_response=%s",
         len(output_rows),
         requested_columns,
         failures,
-        _preview_json(response_content),
+        _preview_json(output_rows),
     )
 
-    return JSONResponse(content=response_content)
+    return JSONResponse(content=output_rows)

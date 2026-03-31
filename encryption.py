@@ -1,5 +1,3 @@
-"""Minimal MySQL-compatible AES decryption helper."""
-
 from __future__ import annotations
 
 import base64
@@ -69,7 +67,7 @@ def _mysql_legacy_derive_key(key: str | bytes, key_size: int = 16) -> bytes:
 
 
 def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
-    """Decrypt ciphertext produced by MySQL AES_ENCRYPT with legacy key derivation."""
+    """Decrypt ciphertext produced by MySQL AES_ENCRYPT with legacy key"""
     if MYSQL_AES_MODE != "aes-128-ecb":
         raise ValueError(f"Unsupported MYSQL_AES_MODE: {MYSQL_AES_MODE}")
 
