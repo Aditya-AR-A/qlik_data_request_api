@@ -308,6 +308,10 @@ def decrypt_payload_basic(
     if payload is None:
         requested_from_query = _parse_columns(columns) if columns else []
         inferred_id = (id_column or "id").strip() or "id"
+        sample_row: dict[str, Any] = {inferred_id: 0}
+        for col in requested_from_query:
+            sample_row[col] = ""
+        sample_rows = [sample_row] if requested_from_query else []
         logger.info(
             "basic payload decrypt connection-test id_column=%s columns=%s",
             inferred_id,
@@ -315,11 +319,12 @@ def decrypt_payload_basic(
         )
         return JSONResponse(
             content={
-                "rows": [],
+                "root": sample_rows,
+                "rows": sample_rows,
                 "meta": {
                     "id_column": inferred_id,
                     "columns": requested_from_query,
-                    "rows": 0,
+                    "rows": len(sample_rows),
                     "failures": 0,
                     "mode": "connection_test",
                 },
@@ -376,6 +381,7 @@ def decrypt_payload_basic(
 
     return JSONResponse(
         content={
+            "root": output_rows,
             "rows": output_rows,
             "meta": {
                 "id_column": id_column,
