@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import uuid
+import json
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -288,8 +289,20 @@ def decrypt_payload_basic(
     payload: Optional[BasicDecryptPayload] = None,
     id_column: Optional[str] = Query(None, description="Identifier column name used in response"),
     columns: Optional[str] = Query(None, description="Comma-separated columns to decrypt"),
+    payload_json: Optional[str] = Query(
+        None,
+        description="Optional JSON payload fallback when connector cannot send request body",
+    ),
 ):
     """Decrypt requested columns from caller-provided rows using BASIC_DECRYPTION_KEY."""
+    # Fallback for connectors that omit BODY but can send query params.
+    if payload is None and payload_json:
+        try:
+            parsed = json.loads(payload_json)
+            payload = BasicDecryptPayload.model_validate(parsed)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid payload_json.") from exc
+
     # Qlik REST connector may call POST endpoint without a body during connection tests.
     # Return an empty but valid shape instead of failing with 422.
     if payload is None:
