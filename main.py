@@ -10,10 +10,11 @@ import logging
 import os
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from access_control import (
     get_allowed_departments,
@@ -21,7 +22,7 @@ from access_control import (
     is_valid_user,
 )
 from data import build_dataframe
-from encryption import decrypt_salary, decrypt_ssn
+from encryption import decrypt_salary, decrypt_ssn, decrypt_with_key
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -40,7 +41,7 @@ logger = logging.getLogger("qlik_api")
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Qlik Secure Data API",
-    version="1.2.0",
+    version="1.3.0",
     description=(
         "Permission-based tabular data API designed for Qlik Sense REST connector, "
         "with additional basic-mode routes for extension prototyping."
@@ -59,16 +60,20 @@ _DECRYPTORS = {
     "ssn": decrypt_ssn,
 }
 
+# Dedicated key used only by basic payload decrypt route.
+BASIC_DECRYPTION_KEY = os.environ.get("BASIC_DECRYPTION_KEY", "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R")
+
 
 @app.on_event("startup")
 def startup_log() -> None:
     logger.info(
-        "startup env=%s log_level=%s dataset_rows=%d aes_mode=%s ciphertext_encoding=%s",
+        "startup env=%s log_level=%s dataset_rows=%d aes_mode=%s ciphertext_encoding=%s basic_key_configured=%s",
         os.environ.get("RENDER_ENV", "local"),
         LOG_LEVEL,
         len(DATASET),
         os.environ.get("MYSQL_AES_MODE", "aes-128-ecb"),
         os.environ.get("MYSQL_CIPHERTEXT_ENCODING", "auto"),
+        bool(BASIC_DECRYPTION_KEY),
     )
 
 
@@ -130,6 +135,21 @@ def _get_all_records() -> list[dict]:
 def _parse_columns(columns_param: str) -> list[str]:
     """Split a comma-separated column list and validate entries."""
     return [c.strip().lower() for c in columns_param.split(",") if c.strip()]
+
+
+class BasicDecryptPayload(BaseModel):
+    rows: list[dict[str, Any]] = Field(
+        ...,
+        description="Rows to decrypt. Example row: {'id': 1, 'hr_id': '<cipher>'}",
+    )
+    id_column: str = Field(
+        ...,
+        description="Identifier column to include in response (e.g. 'id' or 'user_id').",
+    )
+    columns: list[str] = Field(
+        ...,
+        description="Encrypted columns to decrypt from each row (e.g. ['hr_id']).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,66 +282,66 @@ def get_data_basic(
     return JSONResponse(content=records)
 
 
-@app.get("/basic/data/decrypt", summary="Basic mode: selective decryption without verification")
-def get_data_decrypt_basic(
-    columns: str = Query(..., description="Comma-separated list of columns to decrypt (e.g. 'salary,ssn')"),
-    user_ids: Optional[str] = Query(None, description="Comma-separated list of user_ids to decrypt (e.g. '1,3,7'). If omitted, all rows are returned."),
-    limit: Optional[int] = Query(None, ge=1, description="Max records to return"),
-    offset: Optional[int] = Query(None, ge=0, description="Number of records to skip"),
-):
-    """Return requested decrypted columns with no requester or permission checks."""
-    requested = _parse_columns(columns)
-    invalid = [c for c in requested if c not in SENSITIVE_COLUMNS]
-    if invalid:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid column(s) requested for decryption: {', '.join(invalid)}. "
-                f"Allowed: {', '.join(sorted(SENSITIVE_COLUMNS))}."
-            ),
-        )
+@app.post("/basic/decrypt", summary="Basic mode: decrypt posted rows with dedicated key")
+@app.post("/basic/data/decrypt", summary="Basic mode: decrypt posted rows with dedicated key")
+def decrypt_payload_basic(payload: BasicDecryptPayload):
+    """Decrypt requested columns from caller-provided rows using BASIC_DECRYPTION_KEY."""
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="rows must contain at least one item.")
+
+    id_column = payload.id_column.strip()
+    if not id_column:
+        raise HTTPException(status_code=400, detail="id_column is required.")
+
+    requested = [c.strip() for c in payload.columns if c.strip()]
     if not requested:
-        raise HTTPException(status_code=400, detail="No columns specified for decryption.")
-
-    records = _get_all_records()
-
-    if user_ids is not None:
-        target_ids = set()
-        for uid in user_ids.split(","):
-            uid = uid.strip()
-            if uid.isdigit():
-                target_ids.add(int(uid))
-        if not target_ids:
-            raise HTTPException(status_code=400, detail="Invalid user_ids parameter. Provide comma-separated integers.")
-        records = [r for r in records if r["user_id"] in target_ids]
+        raise HTTPException(status_code=400, detail="columns must include at least one column name.")
 
     logger.info(
-        "basic decrypt columns=%s user_ids=%s rows=%d",
+        "basic payload decrypt rows=%d id_column=%s columns=%s",
+        len(payload.rows),
+        id_column,
         requested,
-        user_ids or "all",
-        len(records),
     )
 
-    base_columns = ["user_id"]
-    processed: list[dict] = []
-    for row in records:
-        new_row = {col: row[col] for col in base_columns}
+    output_rows: list[dict[str, Any]] = []
+    failures = 0
+    for idx, row in enumerate(payload.rows, start=1):
+        if id_column not in row:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Row {idx} is missing required id_column '{id_column}'.",
+            )
+
+        out_row: dict[str, Any] = {id_column: row[id_column]}
         for col in requested:
-            decryptor = _DECRYPTORS[col]
+            value = row.get(col)
+            if value in (None, ""):
+                out_row[col] = None
+                continue
+
             try:
-                new_row[col] = decryptor(row[col])
+                out_row[col] = decrypt_with_key(str(value), BASIC_DECRYPTION_KEY)
             except ValueError:
-                logger.warning(
-                    "basic decrypt failed user_id=%s column=%s",
-                    row["user_id"],
-                    col,
-                )
-                new_row[col] = None
-        processed.append(new_row)
+                failures += 1
+                out_row[col] = None
 
-    if offset is not None:
-        processed = processed[offset:]
-    if limit is not None:
-        processed = processed[:limit]
+        output_rows.append(out_row)
 
-    return JSONResponse(content=processed)
+    logger.info(
+        "basic payload decrypt completed rows=%d failures=%d",
+        len(output_rows),
+        failures,
+    )
+
+    return JSONResponse(
+        content={
+            "rows": output_rows,
+            "meta": {
+                "id_column": id_column,
+                "columns": requested,
+                "rows": len(output_rows),
+                "failures": failures,
+            },
+        }
+    )

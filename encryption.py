@@ -161,6 +161,20 @@ def decrypt_ssn(cipher: str | bytes) -> str:
         raise ValueError("Invalid SSN ciphertext") from exc
 
 
+def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
+    """Decrypt ciphertext using a provided key and MySQL AES settings."""
+    try:
+        return _decrypt_mysql_aes(
+            cipher,
+            key,
+            mode=MYSQL_AES_MODE,
+            encoding=MYSQL_CIPHERTEXT_ENCODING,
+        )
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+        logger.error("Failed to decrypt value with provided key")
+        raise ValueError("Invalid ciphertext") from exc
+
+
 # Backward compatibility for older local demo code that still imports encryptors.
 def encrypt_salary(plain: str) -> str:
     return _encrypt_mysql_aes(
