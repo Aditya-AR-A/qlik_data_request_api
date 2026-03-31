@@ -1,7 +1,8 @@
 """Minimal decrypt API for Qlik extension.
 
-Single endpoint:
+Endpoints:
     GET /decrypt
+    POST /decrypt
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ import time
 import uuid
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -29,11 +31,53 @@ logging.basicConfig(
 logger = logging.getLogger("qlik_decrypt_api")
 
 
+def _parse_cors_origins() -> list[str]:
+    raw = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    return origins or ["*"]
+
+
+CORS_ALLOW_ORIGINS = _parse_cors_origins()
+
+
 app = FastAPI(
     title="Qlik Decrypt API",
     version="2.1.0",
     description="Single simple decrypt endpoint for Qlik using query parameters.",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _resolve_allow_origin(request: Request) -> str:
+    origin = request.headers.get("origin")
+    if not origin:
+        return "*"
+    if "*" in CORS_ALLOW_ORIGINS:
+        return "*"
+    if origin in CORS_ALLOW_ORIGINS:
+        return origin
+    return CORS_ALLOW_ORIGINS[0] if CORS_ALLOW_ORIGINS else "*"
+
+
+def _preflight_headers(request: Request) -> dict[str, str]:
+    allow_origin = _resolve_allow_origin(request)
+    allow_headers = request.headers.get("access-control-request-headers", "*")
+    headers = {
+        "Access-Control-Allow-Origin": allow_origin,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": allow_headers,
+        "Access-Control-Max-Age": "86400",
+    }
+    if allow_origin != "*":
+        headers["Vary"] = "Origin"
+    return headers
 
 
 BASIC_DECRYPTION_KEY = os.environ.get("BASIC_DECRYPTION_KEY", "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R")
@@ -94,7 +138,7 @@ def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
 
     if not isinstance(normalized, dict):
         raise HTTPException(
-            status_code=422,
+            status_code=422, ad
             detail="Body must be a JSON object or a JSON-stringified object.",
         )
 
@@ -138,9 +182,10 @@ def _preview_json(payload_obj: Any, max_len: int = 5000) -> str:
 @app.on_event("startup")
 def startup_log() -> None:
     logger.info(
-        "startup log_level=%s basic_key_configured=%s",
+        "startup log_level=%s basic_key_configured=%s cors_allow_origins=%s",
         LOG_LEVEL,
         bool(BASIC_DECRYPTION_KEY),
+        CORS_ALLOW_ORIGINS,
     )
 
 
@@ -180,6 +225,18 @@ async def log_request_lifecycle(request: Request, call_next):
         elapsed_ms,
     )
     return response
+
+
+@app.options("/decrypt", include_in_schema=False)
+def decrypt_preflight(request: Request) -> Response:
+    logger.info("decrypt.preflight path=/decrypt")
+    return Response(status_code=204, headers=_preflight_headers(request))
+
+
+@app.options("/decrypt/", include_in_schema=False)
+def decrypt_preflight_slash(request: Request) -> Response:
+    logger.info("decrypt.preflight path=/decrypt/")
+    return Response(status_code=204, headers=_preflight_headers(request))
 
 
 @app.get("/decrypt", summary="Decrypt by id list and encrypted value list")
