@@ -45,21 +45,52 @@ class DecryptPostRequest(BaseModel):
         None,
         description="Single encrypted column name to decrypt (single-column mode).",
     )
+    columns: Optional[list[str]] = Field(
+        None,
+        description="Encrypted column names to decrypt (multi-column mode).",
+    )
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Rows containing id and encrypted column values.",
+    )
 
 
 def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
     """Accept dict payloads and stringified JSON payloads from Qlik POST calls."""
     normalized: Any = payload
 
-    if isinstance(normalized, str):
+    if isinstance(normalized, (bytes, bytearray)):
+        normalized = normalized.decode("utf-8", errors="replace")
+
+    # Qlik may send JSON as a string, or even a JSON-stringified JSON string.
+    # Parse repeatedly to unwrap nested encoding layers.
+    for _ in range(3):
+        if not isinstance(normalized, str):
+            break
+
         text = normalized.strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="Body cannot be empty.")
+
         try:
             normalized = json.loads(text)
-        except json.JSONDecodeError as exc:
+            continue
+        except json.JSONDecodeError:
+            # Some clients wrap the full JSON in outer single quotes.
+            if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+                try:
+                    normalized = json.loads(text[1:-1])
+                    continue
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Invalid JSON string body: {exc.msg}",
+                    ) from exc
+
             raise HTTPException(
                 status_code=422,
-                detail=f"Invalid JSON string body: {exc.msg}",
-            ) from exc
+                detail="Invalid JSON string body.",
+            )
 
     if not isinstance(normalized, dict):
         raise HTTPException(
@@ -71,14 +102,6 @@ def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
         return DecryptPostRequest.model_validate(normalized)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
-    columns: Optional[list[str]] = Field(
-        None,
-        description="Encrypted column names to decrypt (multi-column mode).",
-    )
-    rows: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="Rows containing id and encrypted column values.",
-    )
 
 
 def _parse_columns(columns_param: str) -> list[str]:
