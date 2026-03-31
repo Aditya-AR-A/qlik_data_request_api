@@ -284,8 +284,35 @@ def get_data_basic(
 
 @app.post("/basic/decrypt", summary="Basic mode: decrypt posted rows with dedicated key")
 @app.post("/basic/data/decrypt", summary="Basic mode: decrypt posted rows with dedicated key")
-def decrypt_payload_basic(payload: BasicDecryptPayload):
+def decrypt_payload_basic(
+    payload: Optional[BasicDecryptPayload] = None,
+    id_column: Optional[str] = Query(None, description="Identifier column name used in response"),
+    columns: Optional[str] = Query(None, description="Comma-separated columns to decrypt"),
+):
     """Decrypt requested columns from caller-provided rows using BASIC_DECRYPTION_KEY."""
+    # Qlik REST connector may call POST endpoint without a body during connection tests.
+    # Return an empty but valid shape instead of failing with 422.
+    if payload is None:
+        requested_from_query = _parse_columns(columns) if columns else []
+        inferred_id = (id_column or "id").strip() or "id"
+        logger.info(
+            "basic payload decrypt connection-test id_column=%s columns=%s",
+            inferred_id,
+            requested_from_query,
+        )
+        return JSONResponse(
+            content={
+                "rows": [],
+                "meta": {
+                    "id_column": inferred_id,
+                    "columns": requested_from_query,
+                    "rows": 0,
+                    "failures": 0,
+                    "mode": "connection_test",
+                },
+            }
+        )
+
     if not payload.rows:
         raise HTTPException(status_code=400, detail="rows must contain at least one item.")
 
