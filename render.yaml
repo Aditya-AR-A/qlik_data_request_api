@@ -7,5 +7,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.0"
+      - key: LOG_LEVEL
+        value: "INFO"
       - key: BASIC_DECRYPTION_KEY
         value: "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R"

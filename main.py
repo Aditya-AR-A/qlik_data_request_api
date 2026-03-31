@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import uuid
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -56,6 +58,28 @@ def _parse_columns(columns_param: str) -> list[str]:
     return [c.strip() for c in columns_param.split(",") if c.strip()]
 
 
+def _preview_value(value: Any, max_len: int = 300) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, bool)):
+        return value
+    text = str(value)
+    if len(text) > max_len:
+        return text[:max_len] + "...<truncated>"
+    return text
+
+
+def _preview_row(row: dict[str, Any], max_len: int = 300) -> dict[str, Any]:
+    return {str(k): _preview_value(v, max_len=max_len) for k, v in row.items()}
+
+
+def _preview_json(payload_obj: Any, max_len: int = 5000) -> str:
+    text = json.dumps(payload_obj, ensure_ascii=True, default=str)
+    if len(text) > max_len:
+        return text[:max_len] + "...<truncated>"
+    return text
+
+
 @app.on_event("startup")
 def startup_log() -> None:
     logger.info(
@@ -63,6 +87,44 @@ def startup_log() -> None:
         LOG_LEVEL,
         bool(BASIC_DECRYPTION_KEY),
     )
+
+
+@app.middleware("http")
+async def log_request_lifecycle(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:10]
+    start = time.perf_counter()
+    client = request.client.host if request.client else "unknown"
+
+    logger.info(
+        "request.start request_id=%s method=%s path=%s query=%s client=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        request.url.query,
+        client,
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.exception(
+            "request.error request_id=%s method=%s path=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            elapsed_ms,
+        )
+        raise
+
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "request.end request_id=%s status=%s duration_ms=%.2f",
+        request_id,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 
 
 @app.post("/basic/data/decrypt", summary="Decrypt posted rows")
@@ -75,13 +137,29 @@ def decrypt_data(
     id_column: Optional[str] = Query(None, description="Connection-test helper field."),
     columns: Optional[str] = Query(None, description="Connection-test helper field."),
 ):
+    logger.info(
+        "decrypt.step=received has_body=%s has_payload_json=%s query_id_column=%s query_columns=%s",
+        payload is not None,
+        bool(payload_json),
+        id_column,
+        columns,
+    )
+
     if not BASIC_DECRYPTION_KEY:
         raise HTTPException(status_code=500, detail="BASIC_DECRYPTION_KEY is not configured.")
 
     if payload is None and payload_json:
         try:
-            payload = DecryptPayload.model_validate(json.loads(payload_json))
+            parsed_payload = DecryptPayload.model_validate(json.loads(payload_json))
+            payload = parsed_payload
+            logger.info(
+                "decrypt.step=payload_json_parsed rows=%d id_column=%s columns=%s",
+                len(parsed_payload.rows),
+                parsed_payload.id_column,
+                parsed_payload.columns,
+            )
         except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("decrypt.step=payload_json_invalid")
             raise HTTPException(status_code=400, detail="Invalid payload_json.") from exc
 
     # Return a schema-friendly sample for connector setup when no body is sent.
@@ -93,19 +171,19 @@ def decrypt_data(
             sample_row[col] = ""
 
         sample_rows = [sample_row] if test_columns else []
-        return JSONResponse(
-            content={
-                "root": sample_rows,
-                "rows": sample_rows,
-                "meta": {
-                    "id_column": test_id_column,
-                    "columns": test_columns,
-                    "rows": len(sample_rows),
-                    "failures": 0,
-                    "mode": "connection_test",
-                },
-            }
-        )
+        response_content = {
+            "root": sample_rows,
+            "rows": sample_rows,
+            "meta": {
+                "id_column": test_id_column,
+                "columns": test_columns,
+                "rows": len(sample_rows),
+                "failures": 0,
+                "mode": "connection_test",
+            },
+        }
+        logger.info("decrypt.step=connection_test response=%s", _preview_json(response_content))
+        return JSONResponse(content=response_content)
 
     if not payload.rows:
         raise HTTPException(status_code=400, detail="rows must contain at least one item.")
@@ -118,6 +196,13 @@ def decrypt_data(
     if not requested_columns:
         raise HTTPException(status_code=400, detail="columns must include at least one column name.")
 
+    logger.info(
+        "decrypt.step=validated rows=%d id_column=%s columns=%s",
+        len(payload.rows),
+        requested_id_column,
+        requested_columns,
+    )
+
     output_rows: list[dict[str, Any]] = []
     failures = 0
 
@@ -128,36 +213,78 @@ def decrypt_data(
                 detail=f"Row {index} is missing required id_column '{requested_id_column}'.",
             )
 
-        out_row: dict[str, Any] = {requested_id_column: row[requested_id_column]}
+        row_id = row[requested_id_column]
+        logger.info(
+            "decrypt.step=row_input index=%d id=%s row=%s",
+            index,
+            _preview_value(row_id),
+            _preview_json(_preview_row(row)),
+        )
+
+        out_row: dict[str, Any] = {requested_id_column: row_id}
         for column in requested_columns:
             value = row.get(column)
             if value in (None, ""):
                 out_row[column] = None
+                logger.info(
+                    "decrypt.step=column_skipped index=%d id=%s column=%s reason=empty",
+                    index,
+                    _preview_value(row_id),
+                    column,
+                )
                 continue
             try:
+                logger.info(
+                    "decrypt.step=column_input index=%d id=%s column=%s encrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    column,
+                    _preview_value(value),
+                )
                 out_row[column] = decrypt_with_key(str(value), BASIC_DECRYPTION_KEY)
+                logger.info(
+                    "decrypt.step=column_output index=%d id=%s column=%s decrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    column,
+                    _preview_value(out_row[column]),
+                )
             except ValueError:
                 failures += 1
                 out_row[column] = None
+                logger.warning(
+                    "decrypt.step=column_failed index=%d id=%s column=%s encrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    column,
+                    _preview_value(value),
+                )
 
         output_rows.append(out_row)
+        logger.info(
+            "decrypt.step=row_output index=%d id=%s row=%s",
+            index,
+            _preview_value(row_id),
+            _preview_json(_preview_row(out_row)),
+        )
+
+    response_content = {
+        "root": output_rows,
+        "rows": output_rows,
+        "meta": {
+            "id_column": requested_id_column,
+            "columns": requested_columns,
+            "rows": len(output_rows),
+            "failures": failures,
+        },
+    }
 
     logger.info(
-        "decrypt rows=%d columns=%s failures=%d",
+        "decrypt.step=complete rows=%d columns=%s failures=%d final_response=%s",
         len(output_rows),
         requested_columns,
         failures,
+        _preview_json(response_content),
     )
 
-    return JSONResponse(
-        content={
-            "root": output_rows,
-            "rows": output_rows,
-            "meta": {
-                "id_column": requested_id_column,
-                "columns": requested_columns,
-                "rows": len(output_rows),
-                "failures": failures,
-            },
-        }
-    )
+    return JSONResponse(content=response_content)
