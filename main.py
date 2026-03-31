@@ -1,7 +1,7 @@
 """Minimal decrypt API for Qlik extension.
 
 Single endpoint:
-    POST /basic/data/decrypt
+    GET /decrypt
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from encryption import decrypt_with_key
 
@@ -31,27 +30,12 @@ logger = logging.getLogger("qlik_decrypt_api")
 
 app = FastAPI(
     title="Qlik Decrypt API",
-    version="2.0.0",
-    description="Single decrypt endpoint that accepts encrypted rows and returns decrypted rows.",
+    version="2.1.0",
+    description="Single simple decrypt endpoint for Qlik using query parameters.",
 )
 
 
 BASIC_DECRYPTION_KEY = os.environ.get("BASIC_DECRYPTION_KEY", "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R")
-
-
-class DecryptPayload(BaseModel):
-    rows: list[dict[str, Any]] = Field(
-        ...,
-        description="Rows that contain encrypted values.",
-    )
-    id_column: str = Field(
-        ...,
-        description="Column name used as row identifier in the response.",
-    )
-    columns: list[str] = Field(
-        ...,
-        description="Encrypted column names to decrypt.",
-    )
 
 
 def _parse_columns(columns_param: str) -> list[str]:
@@ -132,149 +116,7 @@ async def log_request_lifecycle(request: Request, call_next):
     return response
 
 
-@app.get("/basic/data/decrypt", summary="Decrypt posted rows")
-@app.post("/basic/data/decrypt", summary="Decrypt posted rows")
-def decrypt_data(
-    payload: Optional[DecryptPayload] = None,
-    payload_json: Optional[str] = Query(
-        None,
-        description="Optional JSON payload fallback when connector cannot send request body.",
-    ),
-    id_column: Optional[str] = Query(None, description="Connection-test helper field."),
-    columns: Optional[str] = Query(None, description="Connection-test helper field."),
-):
-    logger.info(
-        "decrypt.step=received has_body=%s has_payload_json=%s query_id_column=%s query_columns=%s",
-        payload is not None,
-        bool(payload_json),
-        id_column,
-        columns,
-    )
-
-    if not BASIC_DECRYPTION_KEY:
-        raise HTTPException(status_code=500, detail="BASIC_DECRYPTION_KEY is not configured.")
-
-    if payload is None and payload_json:
-        try:
-            parsed_payload = DecryptPayload.model_validate(json.loads(payload_json))
-            payload = parsed_payload
-            logger.info(
-                "decrypt.step=payload_json_parsed rows=%d id_column=%s columns=%s",
-                len(parsed_payload.rows),
-                parsed_payload.id_column,
-                parsed_payload.columns,
-            )
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("decrypt.step=payload_json_invalid")
-            raise HTTPException(status_code=400, detail="Invalid payload_json.") from exc
-
-    # Return a schema-friendly sample list for connector setup when no body is sent.
-    if payload is None:
-        test_id_column = (id_column or "id").strip() or "id"
-        test_columns = _parse_columns(columns) if columns else []
-        sample_row: dict[str, Any] = {test_id_column: 0}
-        for col in test_columns:
-            sample_row[col] = ""
-
-        sample_rows = [sample_row] if test_columns else []
-        logger.info("decrypt.step=connection_test response=%s", _preview_json(sample_rows))
-        return JSONResponse(content=sample_rows)
-
-    if not payload.rows:
-        raise HTTPException(status_code=400, detail="rows must contain at least one item.")
-
-    requested_id_column = payload.id_column.strip()
-    if not requested_id_column:
-        raise HTTPException(status_code=400, detail="id_column is required.")
-
-    requested_columns = [c.strip() for c in payload.columns if c.strip()]
-    if not requested_columns:
-        raise HTTPException(status_code=400, detail="columns must include at least one column name.")
-
-    logger.info(
-        "decrypt.step=validated rows=%d id_column=%s columns=%s",
-        len(payload.rows),
-        requested_id_column,
-        requested_columns,
-    )
-
-    output_rows: list[dict[str, Any]] = []
-    failures = 0
-
-    for index, row in enumerate(payload.rows, start=1):
-        if requested_id_column not in row:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Row {index} is missing required id_column '{requested_id_column}'.",
-            )
-
-        row_id = row[requested_id_column]
-        logger.info(
-            "decrypt.step=row_input index=%d id=%s row=%s",
-            index,
-            _preview_value(row_id),
-            _preview_json(_preview_row(row)),
-        )
-
-        out_row: dict[str, Any] = {requested_id_column: row_id}
-        for column in requested_columns:
-            value = row.get(column)
-            if value in (None, ""):
-                out_row[column] = None
-                logger.info(
-                    "decrypt.step=column_skipped index=%d id=%s column=%s reason=empty",
-                    index,
-                    _preview_value(row_id),
-                    column,
-                )
-                continue
-            try:
-                logger.info(
-                    "decrypt.step=column_input index=%d id=%s column=%s encrypted=%s",
-                    index,
-                    _preview_value(row_id),
-                    column,
-                    _preview_value(value),
-                )
-                out_row[column] = decrypt_with_key(str(value), BASIC_DECRYPTION_KEY)
-                logger.info(
-                    "decrypt.step=column_output index=%d id=%s column=%s decrypted=%s",
-                    index,
-                    _preview_value(row_id),
-                    column,
-                    _preview_value(out_row[column]),
-                )
-            except ValueError:
-                failures += 1
-                out_row[column] = None
-                logger.warning(
-                    "decrypt.step=column_failed index=%d id=%s column=%s encrypted=%s",
-                    index,
-                    _preview_value(row_id),
-                    column,
-                    _preview_value(value),
-                )
-
-        output_rows.append(out_row)
-        logger.info(
-            "decrypt.step=row_output index=%d id=%s row=%s",
-            index,
-            _preview_value(row_id),
-            _preview_json(_preview_row(out_row)),
-        )
-
-    logger.info(
-        "decrypt.step=complete rows=%d columns=%s failures=%d final_response=%s",
-        len(output_rows),
-        requested_columns,
-        failures,
-        _preview_json(output_rows),
-    )
-
-    return JSONResponse(content=output_rows)
-
-
-@app.get("/basic/data/decrypt/simple", summary="Decrypt by id list and encrypted value list")
+@app.get("/decrypt", summary="Decrypt by id list and encrypted value list")
 def decrypt_data_simple(
     request: Request,
     id_column: str = Query("id", description="Name of the id field."),
