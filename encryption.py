@@ -78,7 +78,7 @@ def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
         decryptor = Cipher(algorithms.AES(folded_key), modes.ECB()).decryptor()
         padded_plain = decryptor.update(cipher_bytes) + decryptor.finalize()
 
-        unpadder = padding.PKCS7(128).unpadder()
+        unpadder = padding.PKCS7(128).unpadder() 
         plain = unpadder.update(padded_plain) + unpadder.finalize()
         return plain.decode("utf-8")
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
