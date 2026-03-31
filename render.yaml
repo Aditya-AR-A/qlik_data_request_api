@@ -1,13 +1,11 @@
 services:
   - type: web
-    name: qlik-data-api
+    name: qlik-decrypt-api
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.0"
-      - key: LOG_LEVEL
-        value: "INFO"
       - key: BASIC_DECRYPTION_KEY
-        value: "basic_decrypt_dev_key"
+        value: "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R"

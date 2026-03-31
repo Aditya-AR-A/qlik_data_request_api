@@ -1,11 +1,10 @@
 [project]
 name = "qlik-api"
 version = "1.0.0"
-description = "Secure, permission-based tabular data API for Qlik Sense"
+description = "Minimal decrypt-only API for Qlik extension"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
-    "pandas>=2.2.0",
     "cryptography>=43.0.0",
 ]
