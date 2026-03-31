@@ -13,9 +13,9 @@ import time
 import uuid
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from encryption import decrypt_with_key
 
@@ -45,6 +45,32 @@ class DecryptPostRequest(BaseModel):
         None,
         description="Single encrypted column name to decrypt (single-column mode).",
     )
+
+
+def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
+    """Accept dict payloads and stringified JSON payloads from Qlik POST calls."""
+    normalized: Any = payload
+
+    if isinstance(normalized, str):
+        text = normalized.strip()
+        try:
+            normalized = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid JSON string body: {exc.msg}",
+            ) from exc
+
+    if not isinstance(normalized, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Body must be a JSON object or a JSON-stringified object.",
+        )
+
+    try:
+        return DecryptPostRequest.model_validate(normalized)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     columns: Optional[list[str]] = Field(
         None,
         description="Encrypted column names to decrypt (multi-column mode).",
@@ -282,23 +308,25 @@ def decrypt_data_simple(
 
 
 @app.post("/decrypt", summary="Decrypt from JSON body")
-def decrypt_data_post(payload: DecryptPostRequest):
+def decrypt_data_post(payload: Any = Body(...)):
+    payload_data = _coerce_post_payload(payload)
+
     logger.info(
         "decrypt.post.step=received id_column=%s column=%s columns=%s rows=%d",
-        payload.id_column,
-        payload.column,
-        payload.columns,
-        len(payload.rows),
+        payload_data.id_column,
+        payload_data.column,
+        payload_data.columns,
+        len(payload_data.rows),
     )
 
     if not BASIC_DECRYPTION_KEY:
         raise HTTPException(status_code=500, detail="BASIC_DECRYPTION_KEY is not configured.")
 
-    requested_id_column = payload.id_column.strip() or "id"
-    requested_columns = [c.strip() for c in (payload.columns or []) if c and c.strip()]
+    requested_id_column = payload_data.id_column.strip() or "id"
+    requested_columns = [c.strip() for c in (payload_data.columns or []) if c and c.strip()]
 
     if not requested_columns:
-        requested_column = (payload.column or "").strip()
+        requested_column = (payload_data.column or "").strip()
         if not requested_column:
             raise HTTPException(
                 status_code=400,
@@ -308,14 +336,14 @@ def decrypt_data_post(payload: DecryptPostRequest):
 
     logger.info(
         "decrypt.post.step=validated rows=%d columns=%s",
-        len(payload.rows),
+        len(payload_data.rows),
         requested_columns,
     )
 
     output_rows: list[dict[str, Any]] = []
     failures = 0
 
-    for index, input_row in enumerate(payload.rows, start=1):
+    for index, input_row in enumerate(payload_data.rows, start=1):
         row_id = input_row.get(requested_id_column)
         logger.info(
             "decrypt.post.step=row_input index=%d id=%s",
