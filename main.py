@@ -138,7 +138,7 @@ def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
 
     if not isinstance(normalized, dict):
         raise HTTPException(
-            status_code=422, ad
+            status_code=422, 
             detail="Body must be a JSON object or a JSON-stringified object.",
         )
 
