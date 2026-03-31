@@ -127,6 +127,7 @@ async def log_request_lifecycle(request: Request, call_next):
     return response
 
 
+@app.get("/basic/data/decrypt", summary="Decrypt posted rows")
 @app.post("/basic/data/decrypt", summary="Decrypt posted rows")
 def decrypt_data(
     payload: Optional[DecryptPayload] = None,
