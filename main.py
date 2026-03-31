@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from encryption import decrypt_with_key
 
@@ -36,6 +37,22 @@ app = FastAPI(
 
 
 BASIC_DECRYPTION_KEY = os.environ.get("BASIC_DECRYPTION_KEY", "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R")
+
+
+class DecryptPostRequest(BaseModel):
+    id_column: str = Field("id", description="Name of the id field in each row.")
+    column: Optional[str] = Field(
+        None,
+        description="Single encrypted column name to decrypt (single-column mode).",
+    )
+    columns: Optional[list[str]] = Field(
+        None,
+        description="Encrypted column names to decrypt (multi-column mode).",
+    )
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Rows containing id and encrypted column values.",
+    )
 
 
 def _parse_columns(columns_param: str) -> list[str]:
@@ -257,6 +274,106 @@ def decrypt_data_simple(
 
     logger.info(
         "decrypt.simple.step=complete rows=%d failures=%d response=%s",
+        len(output_rows),
+        failures,
+        _preview_json(output_rows),
+    )
+    return JSONResponse(content=output_rows)
+
+
+@app.post("/decrypt", summary="Decrypt from JSON body")
+def decrypt_data_post(payload: DecryptPostRequest):
+    logger.info(
+        "decrypt.post.step=received id_column=%s column=%s columns=%s rows=%d",
+        payload.id_column,
+        payload.column,
+        payload.columns,
+        len(payload.rows),
+    )
+
+    if not BASIC_DECRYPTION_KEY:
+        raise HTTPException(status_code=500, detail="BASIC_DECRYPTION_KEY is not configured.")
+
+    requested_id_column = payload.id_column.strip() or "id"
+    requested_columns = [c.strip() for c in (payload.columns or []) if c and c.strip()]
+
+    if not requested_columns:
+        requested_column = (payload.column or "").strip()
+        if not requested_column:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either column (single mode) or columns (multi mode).",
+            )
+        requested_columns = [requested_column]
+
+    logger.info(
+        "decrypt.post.step=validated rows=%d columns=%s",
+        len(payload.rows),
+        requested_columns,
+    )
+
+    output_rows: list[dict[str, Any]] = []
+    failures = 0
+
+    for index, input_row in enumerate(payload.rows, start=1):
+        row_id = input_row.get(requested_id_column)
+        logger.info(
+            "decrypt.post.step=row_input index=%d id=%s",
+            index,
+            _preview_value(row_id),
+        )
+
+        output_row: dict[str, Any] = {requested_id_column: row_id}
+
+        for col in requested_columns:
+            encrypted_value = input_row.get(col)
+            if encrypted_value in ("", None):
+                output_row[col] = None
+                logger.info(
+                    "decrypt.post.step=column_skipped index=%d id=%s column=%s reason=empty",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                )
+                continue
+
+            try:
+                logger.info(
+                    "decrypt.post.step=column_input index=%d id=%s column=%s encrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(encrypted_value),
+                )
+                output_row[col] = decrypt_with_key(encrypted_value, BASIC_DECRYPTION_KEY)
+                logger.info(
+                    "decrypt.post.step=column_output index=%d id=%s column=%s decrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(output_row[col]),
+                )
+            except ValueError:
+                failures += 1
+                output_row[col] = None
+                logger.warning(
+                    "decrypt.post.step=column_failed index=%d id=%s column=%s encrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(encrypted_value),
+                )
+
+        output_rows.append(output_row)
+        logger.info(
+            "decrypt.post.step=row_output index=%d id=%s row=%s",
+            index,
+            _preview_value(row_id),
+            _preview_json(_preview_row(output_row)),
+        )
+
+    logger.info(
+        "decrypt.post.step=complete rows=%d failures=%d response=%s",
         len(output_rows),
         failures,
         _preview_json(output_rows),
