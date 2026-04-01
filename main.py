@@ -181,11 +181,19 @@ def _preview_json(payload_obj: Any, max_len: int = 5000) -> str:
 
 @app.on_event("startup")
 def startup_log() -> None:
+    route_paths = sorted(
+        {
+            getattr(route, "path", "")
+            for route in app.routes
+            if getattr(route, "path", "")
+        }
+    )
     logger.info(
-        "startup log_level=%s basic_key_configured=%s cors_allow_origins=%s",
+        "startup log_level=%s basic_key_configured=%s cors_allow_origins=%s routes=%s",
         LOG_LEVEL,
         bool(BASIC_DECRYPTION_KEY),
         CORS_ALLOW_ORIGINS,
+        route_paths,
     )
 
 
@@ -242,6 +250,16 @@ def decrypt_preflight_slash(request: Request) -> Response:
 @app.get("/health", summary="Health check")
 def health() -> dict[str, str]:
     return {"service": "qlik-decrypt-api", "status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+def root_health() -> dict[str, str]:
+    return {"service": "qlik-decrypt-api", "status": "ok", "path": "/"}
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    return {"service": "qlik-decrypt-api", "status": "ok", "path": "/healthz"}
 
 
 @app.get("/decrypt", summary="Decrypt by id list and encrypted value list")
