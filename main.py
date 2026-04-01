@@ -239,6 +239,11 @@ def decrypt_preflight_slash(request: Request) -> Response:
     return Response(status_code=204, headers=_preflight_headers(request))
 
 
+@app.get("/health", summary="Health check")
+def health() -> dict[str, str]:
+    return {"service": "qlik-decrypt-api", "status": "ok"}
+
+
 @app.get("/decrypt", summary="Decrypt by id list and encrypted value list")
 def decrypt_data_simple(
     request: Request,
