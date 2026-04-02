@@ -189,10 +189,12 @@ def startup_log() -> None:
         }
     )
     logger.info(
-        "startup log_level=%s basic_key_configured=%s cors_allow_origins=%s routes=%s",
+        "startup log_level=%s basic_key_configured=%s cors_allow_origins=%s mysql_aes_mode=%s mysql_ciphertext_encoding=%s routes=%s",
         LOG_LEVEL,
         bool(BASIC_DECRYPTION_KEY),
         CORS_ALLOW_ORIGINS,
+        os.environ.get("MYSQL_AES_MODE", "aes-128-ecb"),
+        os.environ.get("MYSQL_CIPHERTEXT_ENCODING", "auto"),
         route_paths,
     )
 
