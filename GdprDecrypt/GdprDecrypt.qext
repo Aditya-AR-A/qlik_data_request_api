@@ -1,0 +1,8 @@
+{
+  "name": "GdprDecrypt",
+  "description": "Minimal extension to decrypt selected rows and patch visible charts.",
+  "type": "visualization",
+  "version": "1.0.0",
+  "icon": "extension",
+  "author": "Internal"
+}

@@ -66,6 +66,26 @@ def _mysql_legacy_derive_key(key: str | bytes, key_size: int = 16) -> bytes:
     return bytes(folded)
 
 
+def encrypt_with_key(plain_text: str | bytes, key: str | bytes) -> str:
+    """Encrypt plaintext compatible with MySQL AES_ENCRYPT legacy key behavior."""
+    if MYSQL_AES_MODE != "aes-128-ecb":
+        raise ValueError(f"Unsupported MYSQL_AES_MODE: {MYSQL_AES_MODE}")
+
+    try:
+        plain_bytes = plain_text.encode("utf-8") if isinstance(plain_text, str) else bytes(plain_text)
+        folded_key = _mysql_legacy_derive_key(key, key_size=16)
+
+        padder = padding.PKCS7(128).padder()
+        padded_plain = padder.update(plain_bytes) + padder.finalize()
+
+        encryptor = Cipher(algorithms.AES(folded_key), modes.ECB()).encryptor()
+        cipher_bytes = encryptor.update(padded_plain) + encryptor.finalize()
+        return base64.b64encode(cipher_bytes).decode("ascii")
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+        logger.error("Failed to encrypt value")
+        raise ValueError("Invalid plaintext") from exc
+
+
 def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
     """Decrypt ciphertext produced by MySQL AES_ENCRYPT with legacy key"""
     if MYSQL_AES_MODE != "aes-128-ecb":
@@ -75,12 +95,22 @@ def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
         cipher_bytes = _decode_ciphertext(cipher, MYSQL_CIPHERTEXT_ENCODING)
         folded_key = _mysql_legacy_derive_key(key, key_size=16)
 
+        if len(cipher_bytes) % 16 != 0:
+            raise ValueError(
+                f"Ciphertext length must be a multiple of 16 bytes for AES-128-ECB; got {len(cipher_bytes)} bytes"
+            )
+
         decryptor = Cipher(algorithms.AES(folded_key), modes.ECB()).decryptor()
         padded_plain = decryptor.update(cipher_bytes) + decryptor.finalize()
 
-        unpadder = padding.PKCS7(128).unpadder() 
+        unpadder = padding.PKCS7(128).unpadder()
         plain = unpadder.update(padded_plain) + unpadder.finalize()
         return plain.decode("utf-8")
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
-        logger.error("Failed to decrypt value")
+        logger.error(
+            "Failed to decrypt value; mode=%s encoding=%s hint=%s",
+            MYSQL_AES_MODE,
+            MYSQL_CIPHERTEXT_ENCODING,
+            "likely wrong key, wrong AES mode, or ciphertext not produced by MySQL AES_ENCRYPT",
+        )
         raise ValueError("Invalid ciphertext") from exc
