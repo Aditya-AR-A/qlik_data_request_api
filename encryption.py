@@ -12,10 +12,14 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 logger = logging.getLogger(__name__)
 
 CiphertextEncoding = Literal["auto", "raw", "hex", "base64"]
+CiphertextOutputEncoding = Literal["hex", "base64"]
 
 MYSQL_AES_MODE = os.environ.get("MYSQL_AES_MODE", "aes-128-ecb").lower()
 MYSQL_CIPHERTEXT_ENCODING: CiphertextEncoding = os.environ.get(
     "MYSQL_CIPHERTEXT_ENCODING", "auto"
+).lower()  # type: ignore[assignment]
+MYSQL_CIPHERTEXT_OUTPUT_ENCODING: CiphertextOutputEncoding = os.environ.get(
+    "MYSQL_CIPHERTEXT_OUTPUT_ENCODING", "base64"
 ).lower()  # type: ignore[assignment]
 
 
@@ -66,6 +70,14 @@ def _mysql_legacy_derive_key(key: str | bytes, key_size: int = 16) -> bytes:
     return bytes(folded)
 
 
+def _encode_ciphertext(ciphertext: bytes, encoding: CiphertextOutputEncoding) -> str:
+    if encoding == "hex":
+        return ciphertext.hex()
+    if encoding == "base64":
+        return base64.b64encode(ciphertext).decode("ascii")
+    raise ValueError(f"Unsupported MYSQL_CIPHERTEXT_OUTPUT_ENCODING: {encoding}")
+
+
 def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
     """Decrypt ciphertext produced by MySQL AES_ENCRYPT with legacy key"""
     if MYSQL_AES_MODE != "aes-128-ecb":
@@ -84,3 +96,23 @@ def decrypt_with_key(cipher: str | bytes, key: str | bytes) -> str:
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         logger.error("Failed to decrypt value")
         raise ValueError("Invalid ciphertext") from exc
+
+
+def encrypt_with_key(plain_text: str | bytes, key: str | bytes) -> str:
+    """Encrypt plaintext compatible with MySQL AES_ENCRYPT legacy key derivation."""
+    if MYSQL_AES_MODE != "aes-128-ecb":
+        raise ValueError(f"Unsupported MYSQL_AES_MODE: {MYSQL_AES_MODE}")
+
+    try:
+        plain_bytes = plain_text.encode("utf-8") if isinstance(plain_text, str) else bytes(plain_text)
+        folded_key = _mysql_legacy_derive_key(key, key_size=16)
+
+        padder = padding.PKCS7(128).padder()
+        padded_plain = padder.update(plain_bytes) + padder.finalize()
+
+        encryptor = Cipher(algorithms.AES(folded_key), modes.ECB()).encryptor()
+        cipher_bytes = encryptor.update(padded_plain) + encryptor.finalize()
+        return _encode_ciphertext(cipher_bytes, MYSQL_CIPHERTEXT_OUTPUT_ENCODING)
+    except (ValueError, TypeError, binascii.Error) as exc:
+        logger.error("Failed to encrypt value")
+        raise ValueError("Invalid plaintext") from exc

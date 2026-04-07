@@ -1,7 +1,7 @@
 [project]
 name = "qlik-api"
 version = "1.0.0"
-description = "Minimal decrypt-only API for Qlik extension"
+description = "Minimal encrypt/decrypt API for Qlik extension"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",

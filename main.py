@@ -3,6 +3,8 @@
 Endpoints:
     GET /decrypt
     POST /decrypt
+    GET /encrypt
+    POST /encrypt
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from encryption import decrypt_with_key
+from encryption import decrypt_with_key, encrypt_with_key
 
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -28,7 +30,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     force=True,
 )
-logger = logging.getLogger("qlik_decrypt_api")
+logger = logging.getLogger("qlik_crypto_api")
 
 
 def _parse_cors_origins() -> list[str]:
@@ -41,9 +43,9 @@ CORS_ALLOW_ORIGINS = _parse_cors_origins()
 
 
 app = FastAPI(
-    title="Qlik Decrypt API",
-    version="2.1.0",
-    description="Single simple decrypt endpoint for Qlik using query parameters.",
+    title="Qlik Crypto API",
+    version="2.2.0",
+    description="Simple encrypt/decrypt endpoints for Qlik using query parameters or JSON body.",
 )
 
 app.add_middleware(
@@ -81,25 +83,26 @@ def _preflight_headers(request: Request) -> dict[str, str]:
 
 
 BASIC_DECRYPTION_KEY = os.environ.get("BASIC_DECRYPTION_KEY", "OjTmezNUDKYvEeIRf2YnwM9/uUG1d0BYsc8/tRtx+R")
+BASIC_ENCRYPTION_KEY = os.environ.get("BASIC_ENCRYPTION_KEY", BASIC_DECRYPTION_KEY)
 
 
-class DecryptPostRequest(BaseModel):
+class CryptoPostRequest(BaseModel):
     id_column: str = Field("id", description="Name of the id field in each row.")
     column: Optional[str] = Field(
         None,
-        description="Single encrypted column name to decrypt (single-column mode).",
+        description="Single column name to process (single-column mode).",
     )
     columns: Optional[list[str]] = Field(
         None,
-        description="Encrypted column names to decrypt (multi-column mode).",
+        description="Column names to process (multi-column mode).",
     )
     rows: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Rows containing id and encrypted column values.",
+        description="Rows containing id and column values.",
     )
 
 
-def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
+def _coerce_post_payload(payload: Any) -> CryptoPostRequest:
     """Accept dict payloads and stringified JSON payloads from Qlik POST calls."""
     normalized: Any = payload
 
@@ -143,7 +146,7 @@ def _coerce_post_payload(payload: Any) -> DecryptPostRequest:
         )
 
     try:
-        return DecryptPostRequest.model_validate(normalized)
+        return CryptoPostRequest.model_validate(normalized)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
@@ -189,9 +192,10 @@ def startup_log() -> None:
         }
     )
     logger.info(
-        "startup log_level=%s basic_key_configured=%s cors_allow_origins=%s routes=%s",
+        "startup log_level=%s decrypt_key_configured=%s encrypt_key_configured=%s cors_allow_origins=%s routes=%s",
         LOG_LEVEL,
         bool(BASIC_DECRYPTION_KEY),
+        bool(BASIC_ENCRYPTION_KEY),
         CORS_ALLOW_ORIGINS,
         route_paths,
     )
@@ -247,19 +251,31 @@ def decrypt_preflight_slash(request: Request) -> Response:
     return Response(status_code=204, headers=_preflight_headers(request))
 
 
+@app.options("/encrypt", include_in_schema=False)
+def encrypt_preflight(request: Request) -> Response:
+    logger.info("encrypt.preflight path=/encrypt")
+    return Response(status_code=204, headers=_preflight_headers(request))
+
+
+@app.options("/encrypt/", include_in_schema=False)
+def encrypt_preflight_slash(request: Request) -> Response:
+    logger.info("encrypt.preflight path=/encrypt/")
+    return Response(status_code=204, headers=_preflight_headers(request))
+
+
 @app.get("/health", summary="Health check")
 def health() -> dict[str, str]:
-    return {"service": "qlik-decrypt-api", "status": "ok"}
+    return {"service": "qlik-crypto-api", "status": "ok"}
 
 
 @app.get("/", include_in_schema=False)
 def root_health() -> dict[str, str]:
-    return {"service": "qlik-decrypt-api", "status": "ok", "path": "/"}
+    return {"service": "qlik-crypto-api", "status": "ok", "path": "/"}
 
 
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, str]:
-    return {"service": "qlik-decrypt-api", "status": "ok", "path": "/healthz"}
+    return {"service": "qlik-crypto-api", "status": "ok", "path": "/healthz"}
 
 
 @app.get("/decrypt", summary="Decrypt by id list and encrypted value list")
@@ -505,6 +521,261 @@ def decrypt_data_post(payload: Any = Body(...)):
 
     logger.info(
         "decrypt.post.step=complete rows=%d failures=%d response=%s",
+        len(output_rows),
+        failures,
+        _preview_json(output_rows),
+    )
+    return JSONResponse(content=output_rows)
+
+
+@app.get("/encrypt", summary="Encrypt by id list and plain value list")
+def encrypt_data_simple(
+    request: Request,
+    id_column: str = Query("id", description="Name of the id field."),
+    column: Optional[str] = Query(None, description="Single plain-text column name to encrypt."),
+    columns: Optional[str] = Query(
+        None,
+        description="Comma-separated plain-text column names to encrypt in multi-column mode.",
+    ),
+    ids: str = Query(..., description="Delimited list of row ids."),
+    values: Optional[str] = Query(
+        None,
+        description="Delimited list of plain-text values for single-column mode.",
+    ),
+    delimiter: str = Query("|", description="Delimiter used for ids and values."),
+):
+    logger.info(
+        "encrypt.simple.step=received id_column=%s column=%s columns=%s delimiter=%s",
+        id_column,
+        column,
+        columns,
+        delimiter,
+    )
+
+    if not BASIC_ENCRYPTION_KEY:
+        raise HTTPException(status_code=500, detail="BASIC_ENCRYPTION_KEY is not configured.")
+
+    requested_id_column = id_column.strip() or "id"
+
+    id_list = _split_delimited(ids, delimiter)
+
+    requested_columns = _parse_columns(columns) if columns else []
+    multi_mode = len(requested_columns) > 0
+
+    if multi_mode:
+        column_values_map: dict[str, list[str]] = {}
+        for col in requested_columns:
+            param_name = f"values_{col}"
+            raw_values = request.query_params.get(param_name)
+            if raw_values is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing required query parameter '{param_name}' for multi-column mode.",
+                )
+
+            split_values = _split_delimited(raw_values, delimiter)
+            if len(split_values) != len(id_list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{param_name} must contain the same number of items as ids "
+                        f"({len(id_list)} expected)."
+                    ),
+                )
+            column_values_map[col] = split_values
+    else:
+        requested_column = (column or "").strip()
+        if not requested_column:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either column (single mode) or columns (multi mode).",
+            )
+        if values is None:
+            raise HTTPException(status_code=400, detail="values is required in single-column mode.")
+
+        value_list = _split_delimited(values, delimiter)
+        if len(id_list) != len(value_list):
+            raise HTTPException(
+                status_code=400,
+                detail="ids and values must contain the same number of items.",
+            )
+        requested_columns = [requested_column]
+        column_values_map = {requested_column: value_list}
+
+    logger.info(
+        "encrypt.simple.step=validated rows=%d columns=%s multi_mode=%s",
+        len(id_list),
+        requested_columns,
+        multi_mode,
+    )
+
+    output_rows: list[dict[str, Any]] = []
+    failures = 0
+
+    for index, row_id in enumerate(id_list, start=1):
+        logger.info(
+            "encrypt.simple.step=row_input index=%d id=%s",
+            index,
+            _preview_value(row_id),
+        )
+
+        row: dict[str, Any] = {requested_id_column: row_id}
+        for col in requested_columns:
+            plain_value = column_values_map[col][index - 1]
+            if plain_value in ("", None):
+                row[col] = None
+                logger.info(
+                    "encrypt.simple.step=column_skipped index=%d id=%s column=%s reason=empty",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                )
+                continue
+
+            try:
+                logger.info(
+                    "encrypt.simple.step=column_input index=%d id=%s column=%s plain=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(plain_value),
+                )
+                row[col] = encrypt_with_key(plain_value, BASIC_ENCRYPTION_KEY)
+                logger.info(
+                    "encrypt.simple.step=column_output index=%d id=%s column=%s encrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(row[col]),
+                )
+            except ValueError:
+                failures += 1
+                row[col] = None
+                logger.warning(
+                    "encrypt.simple.step=column_failed index=%d id=%s column=%s plain=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(plain_value),
+                )
+
+        output_rows.append(row)
+        logger.info(
+            "encrypt.simple.step=row_output index=%d id=%s row=%s",
+            index,
+            _preview_value(row_id),
+            _preview_json(_preview_row(row)),
+        )
+
+    logger.info(
+        "encrypt.simple.step=complete rows=%d failures=%d response=%s",
+        len(output_rows),
+        failures,
+        _preview_json(output_rows),
+    )
+    return JSONResponse(content=output_rows)
+
+
+@app.post("/encrypt", summary="Encrypt from JSON body")
+def encrypt_data_post(payload: Any = Body(...)):
+    payload_data = _coerce_post_payload(payload)
+
+    logger.info(
+        "encrypt.post.step=received id_column=%s column=%s columns=%s rows=%d",
+        payload_data.id_column,
+        payload_data.column,
+        payload_data.columns,
+        len(payload_data.rows),
+    )
+
+    if not BASIC_ENCRYPTION_KEY:
+        raise HTTPException(status_code=500, detail="BASIC_ENCRYPTION_KEY is not configured.")
+
+    requested_id_column = payload_data.id_column.strip() or "id"
+    requested_columns = [c.strip() for c in (payload_data.columns or []) if c and c.strip()]
+
+    if not requested_columns:
+        requested_column = (payload_data.column or "").strip()
+        if not requested_column:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either column (single mode) or columns (multi mode).",
+            )
+        requested_columns = [requested_column]
+
+    logger.info(
+        "encrypt.post.step=validated rows=%d columns=%s",
+        len(payload_data.rows),
+        requested_columns,
+    )
+
+    output_rows: list[dict[str, Any]] = []
+    failures = 0
+
+    for index, input_row in enumerate(payload_data.rows, start=1):
+        row_id = input_row.get(requested_id_column)
+        logger.info(
+            "encrypt.post.step=row_input index=%d id=%s",
+            index,
+            _preview_value(row_id),
+        )
+
+        output_row: dict[str, Any] = {requested_id_column: row_id}
+
+        for col in requested_columns:
+            plain_value = input_row.get(col)
+            if plain_value in ("", None):
+                output_row[col] = None
+                logger.info(
+                    "encrypt.post.step=column_skipped index=%d id=%s column=%s reason=empty",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                )
+                continue
+
+            if isinstance(plain_value, (bytes, bytearray, memoryview)):
+                value_to_encrypt: str | bytes = bytes(plain_value)
+            else:
+                value_to_encrypt = str(plain_value)
+
+            try:
+                logger.info(
+                    "encrypt.post.step=column_input index=%d id=%s column=%s plain=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(plain_value),
+                )
+                output_row[col] = encrypt_with_key(value_to_encrypt, BASIC_ENCRYPTION_KEY)
+                logger.info(
+                    "encrypt.post.step=column_output index=%d id=%s column=%s encrypted=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(output_row[col]),
+                )
+            except ValueError:
+                failures += 1
+                output_row[col] = None
+                logger.warning(
+                    "encrypt.post.step=column_failed index=%d id=%s column=%s plain=%s",
+                    index,
+                    _preview_value(row_id),
+                    col,
+                    _preview_value(plain_value),
+                )
+
+        output_rows.append(output_row)
+        logger.info(
+            "encrypt.post.step=row_output index=%d id=%s row=%s",
+            index,
+            _preview_value(row_id),
+            _preview_json(_preview_row(output_row)),
+        )
+
+    logger.info(
+        "encrypt.post.step=complete rows=%d failures=%d response=%s",
         len(output_rows),
         failures,
         _preview_json(output_rows),
