@@ -42,23 +42,27 @@ def _looks_like_base64(value: str) -> bool:
 
 
 def _decode_ciphertext(ciphertext: str | bytes, encoding: CiphertextEncoding) -> bytes:
+    
     if isinstance(ciphertext, (bytes, bytearray, memoryview)):
         return bytes(ciphertext)
 
     value = str(ciphertext).strip()
+
     if encoding == "raw":
         return value.encode("utf-8")
     if encoding == "hex":
         return bytes.fromhex(value.removeprefix("0x"))
     if encoding == "base64":
         return base64.b64decode(value, validate=True)
-
+        
+    # AUTO DETECTION
+    # Prefer base64 FIRST because MySQL AES output is commonly base64 encoded.
+    if _looks_like_base64(value):
+        return base64.b64decode(value, validate=True)
     if value.startswith("0x") and _looks_like_hex(value[2:]):
         return bytes.fromhex(value[2:])
     if _looks_like_hex(value):
         return bytes.fromhex(value)
-    if _looks_like_base64(value):
-        return base64.b64decode(value, validate=True)
     return value.encode("utf-8")
 
 
