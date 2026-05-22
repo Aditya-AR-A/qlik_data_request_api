@@ -15,9 +15,10 @@ CiphertextEncoding = Literal["auto", "raw", "hex", "base64"]
 CiphertextOutputEncoding = Literal["hex", "base64"]
 
 MYSQL_AES_MODE = os.environ.get("MYSQL_AES_MODE", "aes-128-ecb").lower()
-MYSQL_CIPHERTEXT_ENCODING: CiphertextEncoding = os.environ.get(
-    "MYSQL_CIPHERTEXT_ENCODING", "auto"
-).lower()  # type: ignore[assignment]
+# MYSQL_CIPHERTEXT_ENCODING: CiphertextEncoding = os.environ.get(
+#     "MYSQL_CIPHERTEXT_ENCODING", "auto"
+# ).lower()  # type: ignore[assignment]
+MYSQL_CIPHERTEXT_ENCODING=base64
 MYSQL_CIPHERTEXT_OUTPUT_ENCODING: CiphertextOutputEncoding = os.environ.get(
     "MYSQL_CIPHERTEXT_OUTPUT_ENCODING", "base64"
 ).lower()  # type: ignore[assignment]
